@@ -1,6 +1,9 @@
 import math
 import simpy
 import random
+import socket
+import time
+import re
 from typing import TypeVar
 
 
@@ -101,52 +104,79 @@ def main():
     dict_neighbour_lookup = {NORTH: [EAST, WEST, SOUTH], WEST: [NORTH, SOUTH, EAST], SOUTH: [WEST, EAST, NORTH],
                              EAST: [SOUTH, NORTH, WEST]}
     env.process(brain_process(env, list_of_parking_objects, dict_neighbour_lookup))
-    env.run(until=60)  # Simulation to run for 60 minutes, to monitor the hourly performance of smart-parking algorithm
-    # for key, value in dict_neighbour_lookup.items():
-    #     temp_list = []
-    #     for neighbour_names in value:
-    #         temp_list.append(str(neighbour_names))
-    #     print(key, temp_list)
+    env.run(until=61)  # Simulation to run for 60 minutes, to monitor the hourly performance of smart-parking algorithm
 
 
 def brain_process(env, list_of_parking_objects, dict_neighbour_lookup):
     counter = 0  # to keep track of time in the interval of 5 minutes, as every arrival or departure is in same multiple
     picked_location = None
-    # let's assume total 5 vehicles already exist across different parking locations throughout the city - default state
-    print("We assume that total 5 vehicles exist (by default) across different parking locations"
-          f" at time: {env.now} minutes.")
-    for total_vehicle in range(5):
-        picked_location = random.choice(list_of_parking_objects)
-        env.process(arrival_of_few_vehicles(env, picked_location, 1, dict_neighbour_lookup))
-    counter += 1
-    while True:
-        yield env.timeout(5)  # Wait a bit (5 minutes) before generating new vehicles
+
+    # create client socket to the DingNet host program
+    socket_host = socket.gethostname()
+    socket_port_to_connect = 5000
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+        client_socket.connect((socket_host, socket_port_to_connect))
+        data = client_socket.recv(1024).decode()
+        print('>>>>>>>>Received from Dingnet server: ' + data)
+        data = client_socket.recv(1024).decode()
+        print(data)
+        for string in data.split(','):
+            print(string)
+            if string:
+                location = string.split('-')[0]
+                count = string.split('-')[1]
+                for parking_object in list_of_parking_objects:
+                    if str(parking_object).upper() == location:
+                        parking_object.set_occupied_spots(int(count))
+                        print(f"Setting parking-location {str(parking_object)} with updated parking occupancy - {(int(count))}")
+        client_socket.send(f"START\n".encode())
+        # let's assume total 5 vehicles already exist across different parking locations throughout the city - default state
+        print("We assume that total 5 vehicles exist (by default) across different parking locations"
+              f" at time: {env.now} minutes.")
+        # Get power data of all motes from DingNet at time t=0
+        data = client_socket.recv(1024).decode()
+        print('>>>>>>>>Received from Dingnet server: ' + data)
+        for total_vehicle in range(5):
+            picked_location = random.choice(list_of_parking_objects)
+            env.process(arrival_of_few_vehicles(env, client_socket, picked_location, 1, dict_neighbour_lookup))
         counter += 1
-        current_time = env.now
-        print("=========================================================")
-        print(f"Overall time spent in the simulation is: {current_time} minutes currently.")
+        while True:
+            yield env.timeout(5)  # Wait a bit (5 minutes) before generating new vehicles
+            counter += 1
+            current_time = env.now
+            print("=========================================================")
+            print(f"Overall time spent in the simulation is: {current_time} minutes currently.")
+            client_socket.send(f"--CURRENT-TIME,{current_time} minutes--\n".encode())
+            # Get power data of all motes from DingNet in every loop
+            data = client_socket.recv(1024).decode()
+            print('>>>>>>>>Received from Dingnet server: ' + data)
 
-        # average rate of vehicle-arrival = 4-7 vehicles / 5 minute
-        total_vehicle = random.randint(4, 7)
-        print(f"Total vehicles arriving right now is: {total_vehicle}")
-        picked_location = random.choice(list_of_parking_objects)
-        print(f"Random parking location chosen right now is: {picked_location}")
-        yield env.process(arrival_of_few_vehicles(env, picked_location, total_vehicle, dict_neighbour_lookup))
+            # average rate of vehicle-arrival = 4-7 vehicles / 5 minute
+            total_vehicle = random.randint(4, 7)
+            print(f"Total vehicles arriving right now is: {total_vehicle}")
+            picked_location = random.choice(list_of_parking_objects)
+            print(f"Random parking location chosen right now is: {picked_location}")
+            yield env.process(arrival_of_few_vehicles(env, client_socket, picked_location, total_vehicle, dict_neighbour_lookup))
 
-        # assuming 2-4 vehicle departure starting 30 minutes of their stay (minimum parking-duration = 30 minutes)
-        if counter > 6:
-            total_vehicle = random.randint(2, 4)
-            print(f"Total vehicles expected to depart right now is: {total_vehicle}")
-            # picked_location = random.choice(list_of_parking_objects)
-            yield env.process(departure_of_few_vehicles(env, list_of_parking_objects, total_vehicle))
+            # assuming 2-4 vehicle departure starting 30 minutes of their stay (minimum parking-duration = 30 minutes)
+            if counter > 6:
+                total_vehicle = random.randint(2, 4)
+                print(f"Total vehicles expected to depart right now is: {total_vehicle}")
+                # picked_location = random.choice(list_of_parking_objects)
+                yield env.process(departure_of_few_vehicles(env, client_socket, list_of_parking_objects, total_vehicle))
+            time.sleep(1)
+        client_socket.send(f"END\n".encode())
+        # Sleep for 2 seconds before ending the communication
+        time.sleep(2)
 
 
-def arrival_of_few_vehicles(env, picked_location: Type_ParkingLocation, total_vehicle, dict_neighbour_lookup):
+def arrival_of_few_vehicles(env, client_socket: socket, picked_location: Type_ParkingLocation, total_vehicle, dict_neighbour_lookup):
     get_number_of_vehicles = 0
     for vehicle in range(total_vehicle):
         returned_parking_location = parking_algorithm(picked_location, dict_neighbour_lookup)
         if returned_parking_location is None:  # if null (None) parking object is returned
             print("Can't do much, as all the parking spots across the city are occupied!")
+            client_socket.send(f"ARRIVE,,\n".encode())
             break
         else:
             get_number_of_vehicles = returned_parking_location.get_occupied_spots()
@@ -154,12 +184,13 @@ def arrival_of_few_vehicles(env, picked_location: Type_ParkingLocation, total_ve
             # now assume that one-vehicle is parked, and increase the parking location mote's occupancy by 1
             returned_parking_location.set_occupied_spots((get_number_of_vehicles + 1))
             # TODO communicate with motes in DingNet to adjust its power
+            client_socket.send(f"ARRIVE,{str(returned_parking_location)},{get_number_of_vehicles + 1}\n".encode())
             returned_parking_location.set_parking_mote_power(set_power_wrt_number_of_vehicles((get_number_of_vehicles + 1)))
             # print("I'm executing successfully!")
     yield env.timeout(0)  # required for simulation to happen, as part of generator process
 
 
-def departure_of_few_vehicles(env, list_of_parking_objects, total_vehicle):
+def departure_of_few_vehicles(env, client_socket: socket, list_of_parking_objects, total_vehicle):
     for vehicle in range(total_vehicle):
         picked_location = random.choice(list_of_parking_objects)
         get_number_of_vehicles = picked_location.get_occupied_spots()
@@ -169,8 +200,11 @@ def departure_of_few_vehicles(env, list_of_parking_objects, total_vehicle):
             # TODO communicate with motes in DingNet to adjust its power
             picked_location.set_parking_mote_power(set_power_wrt_number_of_vehicles((get_number_of_vehicles - 1)))
             print(f"Total vehicles at location '{picked_location}' currently = {picked_location.get_occupied_spots()}")
+            client_socket.send(
+                f"DEPART,{str(picked_location)},{get_number_of_vehicles - 1}\n".encode())
         else:
             print(f"Can't remove any vehicle from {picked_location}, as there are none parked here currently!")
+            client_socket.send(f"DEPART,,\n".encode())
     yield env.timeout(0)  # required for simulation to happen, as part of generator process
 
 
@@ -190,7 +224,7 @@ def set_power_wrt_number_of_vehicles(total_vehicles):
 # -------------------------------------------------------------------------------------------------------------------
 # Allot vehicles to a parking station based on its occupancy or the nearest neighbour with occupancy below threshold
 def parking_algorithm(parking_location: Type_ParkingLocation, dict_neighbour_lookup):
-    threshold_level = 98
+    threshold_level = 95
     # 98% occupancy means no further parking allowed in that location; 2 extra reserved for unexpected scenarios
     flag = False
     decided_parking_location = None
@@ -199,7 +233,7 @@ def parking_algorithm(parking_location: Type_ParkingLocation, dict_neighbour_loo
     current_occupancy = parking_location.get_occupied_spots()
     # print(f"Current occupancy of the {parking_location} is: {current_occupancy}")
     # Algorithm logic follows, as stated above:
-    if current_occupancy > threshold_level:
+    if current_occupancy >= threshold_level:
         for neighbour_name in dict_neighbour_lookup[parking_location]:
             current_occupancy = neighbour_name.get_occupied_spots()
             if current_occupancy < threshold_level:
